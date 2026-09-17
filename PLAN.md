@@ -748,17 +748,18 @@ Core Web Vitals (LCP, CLS ~0, INP low).
 Each phase ends with lint + typecheck + tests green, a manual test guide, and a STOP for review.
 Never leave the build broken between phases.
 
-### Phase 1 — Foundations
-- [ ] Add deps (app + tooling); configure prettier, vitest, path aliases.
-- [ ] `lib/env.ts` Zod env validation (fail fast), `.env.example`.
-- [ ] `lib/logger.ts` (pino + request id helper).
-- [ ] `lib/db.ts` (mongoose singleton, sanitizeFilter), `lib/redis.ts` (ioredis), `lib/r2.ts` (S3 client + presign helpers).
-- [ ] `lib/errors.ts` (ApiError + `withRoute` wrapper), `lib/http.ts` (json, validate, origin check).
-- [ ] Security headers in `next.config.ts` + skeleton `proxy.ts`.
-- [ ] All Mongoose models with indexes.
-- [ ] `GET /api/health`.
+### Phase 1 — Foundations — DONE
+- [x] Add deps (app + tooling); configure prettier, vitest, path aliases.
+- [x] `lib/env.ts` Zod env validation (fail fast), `.env.example`.
+- [x] `lib/logger.ts` (pino + request id helper).
+- [x] `lib/db.ts` (mongoose singleton, sanitizeFilter), `lib/redis.ts` (ioredis), `lib/r2.ts` (S3 client + presign helpers).
+- [x] `lib/errors.ts` (ApiError + `withRoute` wrapper), `lib/http.ts` (json, validate, origin check).
+- [x] Security headers in `next.config.ts` + skeleton `proxy.ts`.
+- [x] All Mongoose models with indexes.
+- [x] `GET /api/health`.
 - Deliverables: app boots, `/api/health` reports mongo/redis/r2, env fails fast when misconfigured.
 - Acceptance: typecheck/lint/tests pass; health returns 200 with all three checks when services up.
+- Result: typecheck + eslint + prettier clean; 8/8 unit tests (env validation) pass.
 
 ### Phase 2 — Auth (with invite-gated signup)
 - [ ] `lib/auth/*` (password, tokens, session, cookies, requireUser, denylist, lockout).
@@ -868,6 +869,13 @@ Never leave the build broken between phases.
 - **D18**: SEO and performance are explicit acceptance gates (§12a/§12b): public shell is indexable and
   metadata-complete, all private/app routes are noindexed, and Lighthouse Perf/A11y/Best-Practices/SEO
   must be 90+ on landing, library, and reader.
+- **D19** (Phase 1): `import "server-only"` is applied to app-only server modules (later phases: auth
+  cookies, next/headers users), NOT to the worker-shared infra (`env`, `logger`, `db`, `redis`, `r2`).
+  Reason: `server-only` throws outside the React Server condition, which the plain-Node worker and tests
+  do not set. Those infra modules pull in Node-only deps (mongoose/ioredis/aws-sdk) so they cannot land
+  in a client bundle anyway.
+- **D20** (Phase 1): `@types/node` bumped `^20 → ^22` to match the Node 22 runtime and satisfy vitest 5's
+  peer requirement. `vitest.config` uses the `.mts` extension (ESM) to avoid the Vite CJS-loader warning.
 
 ## 15. Environment variables (additions to the task's list)
 
