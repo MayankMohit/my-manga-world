@@ -1,17 +1,11 @@
 import { Schema, model, models, type Model, type Types } from "mongoose";
-import {
-  INVITE_KINDS,
-  MEMBER_ROLES,
-  type InviteKind,
-  type MemberRole,
-} from "@/lib/shared/constants";
+import { MEMBER_ROLES, type MemberRole } from "@/lib/shared/constants";
 
 export interface IInvite {
   _id: Types.ObjectId;
   email: string;
   tokenHash: string;
-  kind: InviteKind;
-  seriesId?: Types.ObjectId;
+  seriesId: Types.ObjectId;
   role: MemberRole;
   invitedBy: Types.ObjectId;
   expiresAt: Date;
@@ -25,8 +19,12 @@ const inviteSchema = new Schema<IInvite>(
   {
     email: { type: String, required: true, lowercase: true, trim: true, index: true },
     tokenHash: { type: String, required: true },
-    kind: { type: String, enum: INVITE_KINDS, required: true },
-    seriesId: { type: Schema.Types.ObjectId, ref: "Series", index: true },
+    seriesId: {
+      type: Schema.Types.ObjectId,
+      ref: "Series",
+      required: true,
+      index: true,
+    },
     role: { type: String, enum: MEMBER_ROLES, default: "reader" },
     invitedBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
     expiresAt: { type: Date, required: true },

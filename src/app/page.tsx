@@ -1,69 +1,91 @@
-import Image from "next/image";
+import Link from "next/link";
+import { redirect } from "next/navigation";
+import { getAuthContext } from "@/lib/auth/require-user";
+import { Logo } from "@/components/logo";
+import { ThemeToggle } from "@/components/theme-toggle";
+import { InstallButton } from "@/components/pwa/install-button";
+import { buttonVariants } from "@/components/ui/button";
 
-export default function Home() {
+const FEATURES = [
+  {
+    title: "Your archives, your rules",
+    body: "Upload CBZ, CBR, CB7, PDF, EPUB, or image folders. Everything stays in your own storage.",
+  },
+  {
+    title: "A reader that gets out of the way",
+    body: "Webtoon, single, and double-page modes, RTL or LTR, with fit and zoom controls tuned for long reading.",
+  },
+  {
+    title: "Progress that follows you",
+    body: "Pick up exactly where you left off on any device. Your place is saved automatically.",
+  },
+  {
+    title: "Private by design",
+    body: "No public library and no discovery. Share a series only with the people you invite.",
+  },
+];
+
+export default async function Home() {
+  const ctx = await getAuthContext();
+  if (ctx) redirect("/library");
+
   return (
-    <div className="flex flex-1 flex-col items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex w-full max-w-3xl flex-1 flex-col items-center justify-between bg-white px-16 py-32 sm:items-start dark:bg-black">
-        <Image
-          className="h-5 w-[100px] dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl leading-10 font-semibold tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
+    <div className="flex min-h-full flex-1 flex-col">
+      <header className="mx-auto flex w-full max-w-5xl items-center justify-between px-6 py-5">
+        <Logo />
+        <div className="flex items-center gap-2">
+          <InstallButton />
+          <ThemeToggle />
+          <Link
+            href="/login"
+            className={buttonVariants({ variant: "ghost", size: "sm" })}
+          >
+            Sign in
+          </Link>
+        </div>
+      </header>
+
+      <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-6">
+        <section className="flex flex-col items-start gap-6 py-16 sm:py-24">
+          <h1 className="max-w-2xl text-4xl font-semibold tracking-tight text-balance sm:text-5xl">
+            Upload a comic and start reading. No account needed to begin.
           </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+          <p className="text-muted max-w-xl text-lg">
+            Shelf is a private reader for archives you already own. Drop in a file and we
+            get it ready. Create an account only when you are ready to read, and
+            everything you uploaded is saved to it.
           </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="bg-foreground text-background flex h-12 w-full items-center justify-center gap-2 rounded-full px-5 transition-colors hover:bg-[#383838] md:w-[158px] dark:hover:bg-[#ccc]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="h-[14px] w-4 dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] md:w-[158px] dark:border-white/[.145] dark:hover:bg-[#1a1a1a]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <Link href="/upload" className={buttonVariants({ size: "lg" })}>
+              Upload a file
+            </Link>
+            <Link
+              href="/login"
+              className={buttonVariants({ variant: "outline", size: "lg" })}
+            >
+              Sign in
+            </Link>
+          </div>
+        </section>
+
+        <section className="grid gap-4 pb-20 sm:grid-cols-2">
+          {FEATURES.map((f) => (
+            <div
+              key={f.title}
+              className="border-border bg-surface rounded-2xl border p-6"
+            >
+              <h2 className="font-medium">{f.title}</h2>
+              <p className="text-muted mt-2 text-sm">{f.body}</p>
+            </div>
+          ))}
+        </section>
       </main>
+
+      <footer className="border-border mx-auto w-full max-w-5xl border-t px-6 py-6">
+        <p className="text-muted text-sm">
+          Shelf. A private reader for your own library.
+        </p>
+      </footer>
     </div>
   );
 }

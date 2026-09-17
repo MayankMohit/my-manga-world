@@ -6,10 +6,6 @@ import { z } from "zod";
  * via `lib/shared`, by the worker process.
  */
 
-const booleanString = z
-  .enum(["true", "false", "1", "0"])
-  .transform((v) => v === "true" || v === "1");
-
 const port = z.coerce.number().int().min(1).max(65535);
 
 export const envSchema = z
@@ -44,13 +40,28 @@ export const envSchema = z
 
     WORKER_CONCURRENCY: z.coerce.number().int().positive().default(2),
 
-    // Shelf-specific additions (see PLAN.md section 15)
-    SIGNUPS_OPEN: booleanString.default(false),
+    // Shelf-specific additions (see PLAN.md section 15).
+    // Signup is open/self-serve (email-verified); invites are series-scoped only
+    // (no app-level signup gating). INVITE_TTL bounds series invite link validity.
     INVITE_TTL: z.coerce.number().int().positive().default(604800),
     BOOTSTRAP_ADMIN_EMAIL: z
       .email()
       .optional()
       .or(z.literal("").transform(() => undefined)),
+
+    // Transactional email (Resend). RESEND_API_KEY is required so signup
+    // verification and password reset always work. EMAIL_FROM defaults to the
+    // Resend sandbox sender (dev only); production needs a verified domain.
+    RESEND_API_KEY: z.string().min(1, "RESEND_API_KEY is required"),
+    // Empty or unset falls back to the Resend sandbox sender (dev only).
+    EMAIL_FROM: z.preprocess(
+      (v) => (typeof v === "string" && v.trim() !== "" ? v : undefined),
+      z.string().default("Shelf <onboarding@resend.dev>"),
+    ),
+    EMAIL_VERIFICATION_TTL: z.coerce.number().int().positive().default(600),
+    PASSWORD_RESET_TTL: z.coerce.number().int().positive().default(3600),
+    // Unclaimed anonymous-upload retention (used by the Phase 3 upload pipeline).
+    ANON_UPLOAD_TTL: z.coerce.number().int().positive().default(172800),
 
     LOG_LEVEL: z
       .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])

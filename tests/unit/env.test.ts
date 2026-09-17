@@ -11,6 +11,7 @@ const base = {
   R2_ACCESS_KEY_ID: "key",
   R2_SECRET_ACCESS_KEY: "secret",
   R2_BUCKET: "bucket",
+  RESEND_API_KEY: "re_test_key",
 } as unknown as NodeJS.ProcessEnv;
 
 describe("parseEnv", () => {
@@ -19,21 +20,23 @@ describe("parseEnv", () => {
     expect(env.APP_URL).toBe("http://localhost:3000");
     expect(env.JWT_ACCESS_TTL).toBe(900);
     expect(env.JWT_REFRESH_TTL).toBe(2592000);
-    expect(env.SIGNUPS_OPEN).toBe(false);
     expect(env.INVITE_TTL).toBe(604800);
     expect(env.NODE_ENV).toBe("development");
+    expect(env.EMAIL_FROM).toBe("Shelf <onboarding@resend.dev>");
+    expect(env.EMAIL_VERIFICATION_TTL).toBe(600);
+    expect(env.PASSWORD_RESET_TTL).toBe(3600);
+  });
+
+  it("rejects a missing RESEND_API_KEY", () => {
+    const { RESEND_API_KEY, ...rest } = base;
+    void RESEND_API_KEY;
+    expect(() => parseEnv(rest as NodeJS.ProcessEnv)).toThrow(/RESEND_API_KEY/);
   });
 
   it("coerces numeric strings", () => {
     const env = parseEnv({ ...base, JWT_ACCESS_TTL: "60", MAX_ENTRIES: "10" });
     expect(env.JWT_ACCESS_TTL).toBe(60);
     expect(env.MAX_ENTRIES).toBe(10);
-  });
-
-  it("parses SIGNUPS_OPEN boolean strings", () => {
-    expect(parseEnv({ ...base, SIGNUPS_OPEN: "true" }).SIGNUPS_OPEN).toBe(true);
-    expect(parseEnv({ ...base, SIGNUPS_OPEN: "1" }).SIGNUPS_OPEN).toBe(true);
-    expect(parseEnv({ ...base, SIGNUPS_OPEN: "false" }).SIGNUPS_OPEN).toBe(false);
   });
 
   it("rejects a missing required variable", () => {
@@ -56,6 +59,12 @@ describe("parseEnv", () => {
 
   it("rejects an invalid APP_URL", () => {
     expect(() => parseEnv({ ...base, APP_URL: "not-a-url" })).toThrow(/APP_URL/);
+  });
+
+  it("falls back to the default EMAIL_FROM when it is empty", () => {
+    expect(parseEnv({ ...base, EMAIL_FROM: "" }).EMAIL_FROM).toBe(
+      "Shelf <onboarding@resend.dev>",
+    );
   });
 
   it("treats an empty BOOTSTRAP_ADMIN_EMAIL as undefined", () => {

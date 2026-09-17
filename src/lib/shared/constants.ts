@@ -21,9 +21,6 @@ export type UserRole = (typeof USER_ROLES)[number];
 export const MEMBER_ROLES = ["owner", "reader"] as const;
 export type MemberRole = (typeof MEMBER_ROLES)[number];
 
-export const INVITE_KINDS = ["app", "series"] as const;
-export type InviteKind = (typeof INVITE_KINDS)[number];
-
 export const CHAPTER_STATUS = ["queued", "processing", "ready", "failed"] as const;
 export type ChapterStatus = (typeof CHAPTER_STATUS)[number];
 
@@ -44,6 +41,12 @@ export const UPLOAD_STATUS = [
   "aborted",
 ] as const;
 export type UploadStatus = (typeof UPLOAD_STATUS)[number];
+
+/** Minimum password length, enforced at both validation and hashing layers. */
+export const PASSWORD_MIN_LENGTH = 12;
+
+/** Length of the numeric email-verification code (shared by codegen, schema, UI). */
+export const VERIFICATION_CODE_LENGTH = 6;
 
 /** Redis key namespace. Bump when the cache schema changes. */
 export const CACHE_PREFIX = "shelf:v1";

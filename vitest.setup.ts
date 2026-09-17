@@ -14,6 +14,7 @@ const defaults: Record<string, string> = {
   R2_ACCESS_KEY_ID: "test-key",
   R2_SECRET_ACCESS_KEY: "test-secret",
   R2_BUCKET: "shelf-test",
+  RESEND_API_KEY: "re_test_key",
 };
 
 for (const [key, value] of Object.entries(defaults)) {

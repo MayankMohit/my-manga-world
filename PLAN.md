@@ -19,8 +19,16 @@ touch-friendly, and syncs reading progress.
 
 **In scope**
 - Email + password auth with JWT access/refresh, session rotation, reuse detection.
-- **Invite-based signup** (invite-only instance) and **per-series sharing**: a series owner
-  invites other users as readers; invited users can read but not modify. No public content.
+- **Email-verified, open self-serve signup**: anyone can create an account, but the email is
+  verified with a one-time code (sent via Resend) *before* the account is created. Transactional
+  email covers signup verification, a welcome message, and the full password-reset cycle
+  (request link, reset, confirmation).
+- **Per-series sharing**: a series owner invites specific other users as readers; invited users can
+  read but not modify. No public content — series are private to their owner and accepted members.
+- **Upload before sign-in (claim-on-auth)**: a visitor can upload a file without an account; the
+  API accepts and processes it against a short-lived anonymous session. Reading requires an account,
+  so the visitor is prompted to sign in or sign up at the reader step; on auth, any files uploaded
+  anonymously in that browser session are linked to the account (new or existing) as new files.
 - Direct-to-R2 uploads via presigned URLs (single PUT and multipart).
 - Background ingestion pipeline with live progress over SSE.
 - Library of series, chapters, pages, per-user progress, settings, per-owner storage quota.
@@ -35,7 +43,8 @@ touch-friendly, and syncs reading progress.
 
 **Non-goals (hard constraints)**
 - No public content and no discovery. Content is visible only to a series' owner and the
-  users that owner has explicitly invited. Invite-only: no open self-serve signup.
+  users that owner has explicitly invited. (Account signup itself is open/self-serve; it is
+  *series access*, not account creation, that is invite-gated.)
 - No scraping or fetching content from third-party sites. Uploads only.
 - No payment, no multi-tenant org features, no social features (comments, follows, feeds).
 
@@ -167,10 +176,33 @@ after a `userId` ownership check.
 3. Reader refreshes URLs before expiry; retries an image once on 403.
 
 **Auth**
-- Signup/login → argon2id verify → issue access (15 m) + refresh (30 d) cookies; create `Session`.
+- Signup start → `POST /api/auth/signup` argon2id-hashes the chosen password into a short-lived
+  `EmailVerification` doc and emails a 6-digit code (Resend). **No account exists yet.**
+- Verify → `POST /api/auth/verify-email` with the code → create `User`, delete the pending doc,
+  send a welcome email, issue access (15 m) + refresh (30 d) cookies, create `Session`.
+- Login → argon2id verify → issue access + refresh cookies; create `Session`.
 - Protected navigation → `proxy.ts` verifies access token (jose, edge) → allow or redirect to `/login`.
 - API 401 → client calls `POST /api/auth/refresh` once → rotates refresh (reuse detection) → retries.
 - Logout → revoke session + denylist access `jti` in Redis until exp. Logout-all → revoke all sessions + bump `tokenVersion`.
+
+**Password reset**
+1. `POST /api/auth/password/forgot` `{ email }` → if a user exists, mint an opaque reset token
+   (stored only as a sha-256 hash in `PasswordReset`, `PASSWORD_RESET_TTL`), email a link
+   `${APP_URL}/reset-password?token=…`. Always returns a generic 200 (no account enumeration).
+2. `POST /api/auth/password/reset` `{ token, password }` → verify hash + expiry + unused → set new
+   argon2id hash, bump `tokenVersion`, mark the token used, revoke all sessions, send a
+   "password changed" email. User then signs in fresh.
+
+**Anonymous upload → claim on auth**
+1. A visitor opens `/upload` (public). The first upload issues an httpOnly **anon-session cookie**
+   (`shelf_anon`, opaque id, `ANON_UPLOAD_TTL`). `Upload`/`Chapter`/`Series` created for that upload
+   carry `anonId` instead of `userId`/`ownerId` and get a TTL so unclaimed data is purged.
+2. Processing runs exactly as for a signed-in user (worker pipeline).
+3. To read, the visitor must authenticate. `/read/*` is gated → redirect to `/login?next=…`.
+4. On successful signup or login, the auth service **claims** every anonymous resource tagged with
+   the request's `shelf_anon` id: set `ownerId`/`userId` to the account, clear `anonId` + TTL, add
+   the owner `SeriesMember`, recompute `storageUsedBytes`, then clear the anon cookie. Claimed files
+   appear as new files in the account (identical for brand-new and existing accounts).
 
 ---
 
@@ -191,8 +223,8 @@ my-manga-world/
 │  ├─ app/
 │  │  ├─ (marketing)/page.tsx            # landing, redirects signed-in → /library
 │  │  ├─ login/page.tsx
-│  │  ├─ signup/page.tsx                    # requires ?invite=<token> when SIGNUPS_OPEN=false
-│  │  ├─ accept/[token]/page.tsx            # invite landing (preview + accept / route to signup)
+│  │  ├─ signup/page.tsx                    # open self-serve signup (optional ?next= redirect)
+│  │  ├─ accept/[token]/page.tsx            # series-invite landing (preview + accept / route to login|signup)
 │  │  ├─ (app)/library/page.tsx
 │  │  ├─ (app)/series/[id]/page.tsx         # includes Share panel (members + invite link)
 │  │  ├─ (app)/upload/page.tsx              # reader-mode chooser for PDF/EPUB
@@ -202,7 +234,7 @@ my-manga-world/
 │  │  └─ api/
 │  │     ├─ auth/{signup,login,refresh,logout,logout-all,me,change-password}/route.ts
 │  │     ├─ auth/sessions/route.ts, auth/sessions/[id]/route.ts
-│  │     ├─ invites/route.ts (list/mint app invites; admin), invites/[token]/route.ts (GET preview + POST accept)
+│  │     ├─ invites/[token]/route.ts (GET series-invite preview + POST accept)
 │  │     ├─ uploads/presign/route.ts
 │  │     ├─ uploads/[id]/{parts,complete,abort}/route.ts
 │  │     ├─ jobs/[id]/route.ts, jobs/[id]/stream/route.ts
@@ -266,7 +298,7 @@ Access to content is resolved via `SeriesMember`, not `ownerId` equality.
 | name | string | optional display name |
 | tokenVersion | number | default 0; bumped on logout-all / password change |
 | storageUsedBytes | number | default 0; counts only series this user **owns** |
-| role | "user" \| "admin" | default "user"; admin can mint app invites and manage the instance. First user (when no users exist, or matching `BOOTSTRAP_ADMIN_EMAIL`) becomes admin |
+| role | "user" \| "admin" | default "user"; admin handles instance operations (maintenance/ops), not signup gating. First user (when no users exist, or matching `BOOTSTRAP_ADMIN_EMAIL`) becomes admin |
 | settings | subdoc | `{ readingMode: "vertical"\|"single"\|"double", direction: "rtl"\|"ltr", fit: "width"\|"height"\|"original", theme: "light"\|"dark"\|"system", preloadCount: number }` |
 
 Indexes: `{ email: 1 }` unique.
@@ -285,6 +317,30 @@ Indexes: `{ email: 1 }` unique.
 
 Indexes: `{ userId: 1 }`, `{ refreshTokenHash: 1 }`, `{ familyId: 1 }`, TTL `{ expiresAt: 1 }, expireAfterSeconds: 0`.
 
+### EmailVerification (pending signup)
+Holds a signup that is verified but not yet an account. Created by signup-start, consumed by
+verify-email. No `User` row exists until the code is confirmed.
+| field | type | notes |
+|---|---|---|
+| email | string | unique, lowercased target |
+| codeHash | string | sha-256 of the 6-digit code (never stored raw) |
+| passwordHash | string | argon2id of the chosen password (hashed once at start) |
+| name | string? | optional display name |
+| attempts | number | wrong-code attempts; capped (`VERIFICATION_MAX_ATTEMPTS`) then invalidated |
+| expiresAt | Date | TTL index; `EMAIL_VERIFICATION_TTL` |
+
+Indexes: `{ email: 1 }` unique (one pending signup per email; start upserts), TTL `{ expiresAt: 1 }`.
+
+### PasswordReset
+| field | type | notes |
+|---|---|---|
+| userId | ObjectId | ref User |
+| tokenHash | string | sha-256 of the opaque reset token (raw only in the emailed link) |
+| expiresAt | Date | TTL index; `PASSWORD_RESET_TTL` |
+| usedAt | Date? | single-use; set on successful reset |
+
+Indexes: `{ tokenHash: 1 }` unique, `{ userId: 1 }`, TTL `{ expiresAt: 1 }`.
+
 ### SeriesMember (sharing)
 | field | type | notes |
 |---|---|---|
@@ -297,12 +353,13 @@ Indexes: `{ seriesId: 1, userId: 1 }` unique, `{ userId: 1 }` (list all series a
 The owner gets an `owner` membership row on series create (single source of truth for access).
 
 ### Invite
+Series-scoped only — an invite always grants membership in one specific series. Signup does not
+require an invite.
 | field | type | notes |
 |---|---|---|
 | email | string | lowercased target email |
 | tokenHash | string | sha-256 of the opaque invite token (raw token only in the link) |
-| kind | "app" \| "series" | app: allows account creation; series: also grants membership |
-| seriesId | ObjectId? | required when kind=series |
+| seriesId | ObjectId | required; the series this invite grants access to |
 | role | "reader" | series role granted on accept (owner-only invites are not issued) |
 | invitedBy | ObjectId | |
 | expiresAt | Date | TTL index; from `INVITE_TTL` |
@@ -377,7 +434,8 @@ Indexes: `{ userId: 1, chapterId: 1 }` unique, `{ userId: 1, seriesId: 1 }`, `{ 
 ### Upload
 | field | type | notes |
 |---|---|---|
-| userId | ObjectId | |
+| userId | ObjectId? | set once claimed; null while anonymous |
+| anonId | string? | anon-session id while unclaimed; cleared on claim (indexed) |
 | rawKey | string | uploads/raw/... |
 | originalName | string | sanitized |
 | size | number | declared ContentLength |
@@ -389,10 +447,16 @@ Indexes: `{ userId: 1, chapterId: 1 }` unique, `{ userId: 1, seriesId: 1 }`, `{ 
 | renderMode | "images" \| "document" ? | reader-mode choice; only "document" allowed for PDF/EPUB |
 | expiresAt | Date | TTL index (2 days) for abandoned uploads |
 
-Indexes: `{ userId: 1 }`, `{ rawKey: 1 }`, TTL `{ expiresAt: 1 }`.
+Indexes: `{ userId: 1 }`, `{ anonId: 1 }`, `{ rawKey: 1 }`, TTL `{ expiresAt: 1 }`.
 
-> Note: `Series` models list uses `SeriesMember`; `Progress`/`Upload`/`Session` stay per-`userId`.
-> The models directory therefore includes: `User, Session, SeriesMember, Invite, Series, Chapter, Page, Progress, Upload`.
+> Anonymous uploads: while unclaimed, `Upload` (and the `Series`/`Chapter` it produces) carry
+> `anonId` and a TTL instead of `userId`/`ownerId`. Claiming (on signup/login from the same browser)
+> sets the ownership fields, clears `anonId` + TTL, and adds the owner `SeriesMember`. Content models
+> (`Series`/`Chapter`/`Page`) therefore make `ownerId` optional-until-claimed with a matching `anonId`.
+
+> Note: `Series` list access uses `SeriesMember`; `Progress`/`Upload`/`Session` stay per-`userId`.
+> The models directory therefore includes: `User, Session, EmailVerification, PasswordReset,
+> SeriesMember, Invite, Series, Chapter, Page, Progress, Upload`.
 
 ---
 
@@ -488,8 +552,12 @@ Rate-limit tiers referenced below: `auth-strict`, `auth-refresh`, `upload`, `wri
 ### Auth
 | method | path | auth | RL | request (Zod) | success response |
 |---|---|---|---|---|---|
-| POST | /api/auth/signup | no | auth-strict | `{ email, password(min12), name?, inviteToken? }` (inviteToken required unless SIGNUPS_OPEN; must match email) | 201 `{ user }` + sets cookies; consumes invite (grants series membership if kind=series) |
-| POST | /api/auth/login | no | auth-strict | `{ email, password }` | 200 `{ user }` + cookies (generic error on fail) |
+| POST | /api/auth/signup | no | auth-strict | `{ email, password(min12), name? }` (open signup; no invite) | 200 `{ pending:true, email }`; emails a 6-digit code. **No account/cookies yet.** 409 if email already registered |
+| POST | /api/auth/verify-email | no | auth-strict | `{ email, code }` | 201 `{ user }` + sets cookies (creates the account, sends welcome email; claims anon uploads). 400 on bad/expired code |
+| POST | /api/auth/verify-email/resend | no | auth-strict | `{ email }` | 200 `{ ok:true }` (regenerates + resends the code if a pending signup exists; generic response) |
+| POST | /api/auth/password/forgot | no | auth-strict | `{ email }` | 200 `{ ok:true }` (generic; emails a reset link if the account exists) |
+| POST | /api/auth/password/reset | no | auth-strict | `{ token, password(min12) }` | 200 `{ ok:true }` (sets new password, revokes all sessions, emails confirmation). 400 on bad/expired token |
+| POST | /api/auth/login | no | auth-strict | `{ email, password }` | 200 `{ user }` + cookies (generic error on fail; claims anon uploads) |
 | POST | /api/auth/refresh | cookie | auth-refresh | (refresh cookie) | 200 `{ ok:true }` + rotated cookies |
 | POST | /api/auth/logout | yes | write | — | 204, revoke session + denylist jti |
 | POST | /api/auth/logout-all | yes | write | — | 204, revoke all + bump tokenVersion |
@@ -501,9 +569,8 @@ Rate-limit tiers referenced below: `auth-strict`, `auth-refresh`, `upload`, `wri
 ### Invites & sharing
 | method | path | auth | RL | request | response |
 |---|---|---|---|---|---|
-| GET | /api/invites/:token | no | read | param token | 200 `{ kind, email, seriesTitle?, invitedByName, expiresAt }` (preview; 404 if invalid/expired) |
-| POST | /api/invites/:token | maybe | auth-strict | — | explicit accept: if signed-in and email matches → accept (add membership, mark invite consumed); if signed-in but email differs → 403; if not signed-in → 409 `{ needsAuth:true, email }` (client routes to login/signup, then re-POSTs) |
-| POST | /api/invites | admin | write | `{ email }` | 201 `{ inviteUrl }` (mint an app invite) |
+| GET | /api/invites/:token | no | read | param token | 200 `{ email, seriesTitle, invitedByName, expiresAt }` (series-invite preview; 404 if invalid/expired) |
+| POST | /api/invites/:token | maybe | auth-strict | — | explicit accept: if signed-in and email matches → accept (add series membership, mark invite consumed); if signed-in but email differs → 403; if not signed-in → 409 `{ needsAuth:true, email }` (client routes to login/signup, then re-POSTs) |
 | GET | /api/series/:id/members | yes (owner) | read | — | 200 `{ members: [{ userId, name, email, role }] }` |
 | GET | /api/series/:id/invites | yes (owner) | read | — | 200 `{ invites: [{ email, expiresAt, acceptedAt? }] }` (pending + recent) |
 | POST | /api/series/:id/invites | yes (owner) | write | `{ email }` | 201 `{ inviteUrl }` (always creates a pending invite; membership is granted only when the invitee clicks accept, even if they already have an account) |
@@ -520,6 +587,13 @@ Rate-limit tiers referenced below: `auth-strict`, `auth-refresh`, `upload`, `wri
 Presign enforces: size ≤ MAX_UPLOAD_BYTES, quota (storageUsed + size ≤ MAX_STORAGE_BYTES_PER_USER),
 concurrent-ingest guard, filename sanitized, `ContentType`/`ContentLength` bound into the signature.
 Complete re-verifies via `HeadObject` (actual size matches declared) and re-checks quota.
+
+**Anonymous uploads (Phase 3).** `/api/uploads/*` accept either an authenticated user *or* an
+anon-session cookie (`shelf_anon`, minted on first anonymous upload, `ANON_UPLOAD_TTL`). Anonymous
+`Upload`/`Series`/`Chapter` carry `anonId` + a TTL and are not readable until claimed. Reading
+(`/api/chapters/:id/pages|document`, progress, library) always requires a real account. Signup/login
+claim the caller's anon resources (see §9); a per-anon-session storage cap replaces the per-user
+quota while unclaimed.
 
 ### Jobs
 | method | path | auth | RL | response |
@@ -566,12 +640,33 @@ Complete re-verifies via `HeadObject` (actual size matches declared) and re-chec
 
 ## 9. Auth design (token lifecycle)
 
-- **Signup gating (invite-only)**: when `SIGNUPS_OPEN=false` (default), signup requires a valid,
-  unexpired `inviteToken` whose email matches the submitted email. When `SIGNUPS_OPEN=true`, signup
-  is open. **Bootstrap**: if no users exist (or the email equals `BOOTSTRAP_ADMIN_EMAIL`), the account
-  is created as `role=admin` with no invite required, so the instance owner can get in first. Series
-  invites (kind=series) also serve as app invites; accepting one after signup grants the membership.
-- **Passwords**: argon2id (`argon2` lib, memoryCost/timeCost tuned for ~250 ms). Min length 12.
+- **Signup (open / self-serve, email-verified)**: `POST /api/auth/signup` takes
+  `{ email, password(min12), name? }`, checks for a duplicate (→ 409), argon2id-hashes the password, and
+  stores it in a short-lived `EmailVerification` doc keyed by email (upsert — one pending signup per
+  email), then emails a 6-digit code (Resend). **No `User` exists yet.** `POST /api/auth/verify-email`
+  `{ email, code }` compares the code (timing-safe hash compare, attempt-capped, expiry-checked), creates
+  the `User` from the pending doc, deletes it, sends a welcome email, and logs the user in. **Admin
+  bootstrap** (first user, or `BOOTSTRAP_ADMIN_EMAIL`) is evaluated at account creation (verify step).
+  **Series access is separate**: reading someone else's series requires accepting that series' invite.
+- **Email verification codes**: 6 digits, generated with `crypto.randomInt` (no modulo bias), stored only
+  as a sha-256 hash, `EMAIL_VERIFICATION_TTL` (10 min default). Wrong codes increment `attempts`; past
+  `VERIFICATION_MAX_ATTEMPTS` the pending signup is invalidated and the user must restart. Resend
+  regenerates the code. All verify/resend routes are `auth-strict` rate-limited.
+- **Password reset**: `POST /api/auth/password/forgot` `{ email }` always returns a generic 200; if the
+  user exists it mints an opaque 32-byte token (sha-256 hashed at rest, `PASSWORD_RESET_TTL`, single-use)
+  and emails `${APP_URL}/reset-password?token=…`. `POST /api/auth/password/reset` `{ token, password }`
+  verifies hash + expiry + unused, sets the new argon2id hash, bumps `tokenVersion`, marks the token
+  used, revokes every session, and emails a confirmation. The user then signs in fresh.
+- **Transactional email (Resend)**: verification code, welcome, password-reset link, and
+  password-changed confirmation. Templates are pure `{subject, html, text}` builders (unit-tested, no em
+  dashes); sending is isolated in a `server-only` module. Verification-send failure fails the request
+  (the user is waiting for the code); welcome/confirmation failures are logged but never block the flow.
+- **Anonymous upload claim**: on successful signup (verify step) or login, the auth service reads the
+  `shelf_anon` cookie and reassigns every `Upload`/`Series`/`Chapter` with that `anonId` to the account
+  (set `ownerId`/`userId`, clear `anonId` + TTL, add owner `SeriesMember`, recompute storage), then
+  clears the cookie. Works identically for new and existing accounts (see §3.2). *(Implemented in Phase 3
+  with the upload pipeline; the auth hooks land here.)*
+- **Passwords**: argon2id (`@node-rs/argon2`, memoryCost 64 MiB / timeCost 3 / parallelism 1). Min length 12.
 - **Access token**: JWT HS256 via `jose`, TTL `JWT_ACCESS_TTL` (900 s). Claims
   `{ sub: userId, sid: sessionId, tv: tokenVersion, jti, iat, exp, iss: APP_URL, aud: "shelf" }`.
 - **Refresh token**: random 32-byte opaque token (base64url). Stored only as sha-256 hash in `Session`.
@@ -598,15 +693,16 @@ Complete re-verifies via `HeadObject` (actual size matches declared) and re-chec
 
 - [ ] Membership check on every content resource (read: owner|reader; write: owner); non-member → 404 not 403.
 - [ ] Invite tokens: opaque, hashed at rest, single-use, email-bound, expiring; timing-safe lookup.
-- [ ] Zod validation on every body, query, and route param (ObjectId regex); `.strict()` rejects unknown keys.
-- [ ] `mongoose.set("sanitizeFilter", true)`; never spread raw request objects into queries.
-- [ ] CSRF: SameSite=Lax cookies + Origin/Referer allowlist on all state-changing methods. (Decision: header check over double-submit token, since cookies are httpOnly and SPA is same-origin.)
-- [ ] Security headers (next.config + proxy): strict CSP (img-src/connect-src allow R2 host + self; `worker-src 'self'`, `manifest-src 'self'` for the PWA; PDF.js/epub.js needs handled), HSTS, X-Content-Type-Options=nosniff, Referrer-Policy=strict-origin-when-cross-origin, frame-ancestors 'none', Permissions-Policy minimal. Service worker + manifest served same-origin.
+- [x] Email-verification codes + password-reset tokens: hashed at rest (never stored/logged raw), TTL'd, single-use, attempt-capped (codes); timing-safe compare; generic responses on forgot/resend (no account enumeration). Emails never contain passwords.
+- [~] Zod validation on every body, query, and route param (ObjectId regex); `.strict()` rejects unknown keys. (Done for auth routes; extended to each content route as it is built.)
+- [x] `mongoose.set("sanitizeFilter", true)`; never spread raw request objects into queries. (Code-authored operator filters use `mongoose.trusted()` — see D23.)
+- [x] CSRF: SameSite=Lax cookies + Origin/Referer allowlist on all state-changing methods (`assertSameOrigin`; verified 403 without Origin). (Decision: header check over double-submit token, since cookies are httpOnly and SPA is same-origin.)
+- [x] Security headers (next.config + proxy): strict CSP (img-src/connect-src allow R2 host + self; `worker-src 'self'`, `manifest-src 'self'` for the PWA; PDF.js/epub.js needs handled), HSTS, X-Content-Type-Options=nosniff, Referrer-Policy=strict-origin-when-cross-origin, frame-ancestors 'none', Permissions-Policy minimal. Service worker + manifest served same-origin. (Phase 1; CSP tightened further in Phase 8.)
 - [ ] Archive safety: MAX_ENTRIES, MAX_UNCOMPRESSED_BYTES, compression-ratio cap; zip-slip (reject `..`, absolute, null bytes); reject password-protected archives; every image decoded by sharp before acceptance; temp cleaned in `finally`.
 - [ ] Upload safety: presign binds key + ContentType + ContentLength; filename sanitized; HeadObject size verify at complete; quota at presign and complete.
-- [ ] `import "server-only"` on server modules; never log tokens/passwords/presigned URLs.
-- [ ] pino structured logging with request ids; client errors carry no stack traces.
-- [ ] Timing-safe token comparisons; generic auth error messages.
+- [x] `import "server-only"` on server modules (cookies, require-user, auth.service); never log tokens/passwords/presigned URLs (pino redaction).
+- [x] pino structured logging with request ids; client errors carry no stack traces (`toErrorResponse` returns safe shapes only).
+- [~] Timing-safe token comparisons; generic auth error messages. (Generic login error done; refresh/access tokens looked up by sha-256 hash / verified by jose, not string-compared.)
 - [ ] `npm audit` in final phase.
 
 ---
@@ -655,8 +751,16 @@ Tailwind v4 `@theme` tokens (CSS variables), mapped for both modes:
   text/UI accents and interactive states, not small body text on `#EEEEEE`.
 - The reader uses a pure-black option too (deep dark for OLED) as a reader-only theme; app chrome stays on the palette.
 
-- **/** (landing): value prop, sign in / create account CTAs; signed-in users redirected to `/library`.
-- **/login**, **/signup**: minimal forms, inline validation, generic auth errors, loading states.
+- **/** (landing): value prop; **primary CTA is "Upload a file" → `/upload`** (no account required),
+  with "Sign in" offered in the header and as a secondary action. Copy makes clear you only sign in when
+  you are ready to read. Signed-in users are redirected to `/library`.
+- **/login**: minimal form, inline validation, generic auth errors, loading states; honors `?next=`.
+- **/signup**: two steps in one page — (1) name/email/password, then (2) enter the 6-digit code emailed
+  to you (with a "resend code" action and a way to edit the email). On verify, the account is created and
+  the user is signed in and sent to `?next=` or `/library`. Generic errors, loading states.
+- **/forgot-password**: email field → always shows a "check your email" confirmation (no enumeration).
+- **/reset-password**: reads `?token=`, new-password field (min 12) with confirmation, then a success
+  state linking to `/login`. Invalid/expired tokens show a clear message and a link to request another.
 - **/library**: "Continue reading" horizontal row; responsive cover grid; search box (debounced);
   sort (recent, title, recently added); floating Upload button; storage usage bar. Skeletons + empty state.
 - **/series/[id]**: cover, editable metadata (title/description/tags) with optimistic save; chapter list
@@ -664,18 +768,21 @@ Tailwind v4 `@theme` tokens (CSS variables), mapped for both modes:
   **Owners** see a Share panel: current members with roles, pending invites, remove member, and "Invite
   by email" that produces a copyable invite link (the invitee must open it and click accept, even if they
   already have an account). **Readers** see a read-only view (no edit/upload/delete/share controls).
-- **/upload** (owners only): drag-and-drop multiple files and folders; per-file cards with upload progress
-  (incl. multipart part progress); after upload, live processing progress via SSE; assign to a series you
-  own or create new; edit chapter number/title/volume before submit; cancel/abort support.
-  For PDF/EPUB files, a **reader-mode chooser** offers only the possible options: "Read as pages
+- **/upload** (public — no account required): drag-and-drop multiple files and folders; per-file cards
+  with upload progress (incl. multipart part progress); after upload, live processing progress via SSE;
+  assign to a series you own or create new; edit chapter number/title/volume before submit; cancel/abort
+  support. For PDF/EPUB files, a **reader-mode chooser** offers only the possible options: "Read as pages
   (optimized images)" or "Keep original document (native reader)". Other formats default to pages.
+  Anonymous visitors can upload and watch processing; a banner explains that reading needs an account and
+  that their uploads will be saved to it on sign-in. Clicking "Read" (or any reader link) routes an
+  anonymous visitor to `/login?next=…`; after auth their uploads are claimed automatically.
 - **/accept/[token]**: invite landing. Shows who invited you and to what; if signed in with the matching
   email, one-click accept; otherwise routes to signup with the email prefilled and token attached.
 - **/read/[chapterId]**: dispatches by `renderMode` — the image reader (below) or the native document
   reader (PDF.js with text layer + page nav; epub.js with reflow, font size, and chapter TOC). Both
   save progress the same way (page index for images/PDF; CFI-derived percentage for EPUB).
 - **/settings**: reading defaults (mode, direction, fit, preload count), theme; active sessions list with
-  revoke; change password; storage usage. Admins additionally get an "Invite people" control (app invites).
+  revoke; change password; storage usage. (Sharing/invites live on each series' Share panel, not here.)
 
 **PWA / installable app**
 - Web App Manifest (`app/manifest.ts`): `name`, `short_name: "Shelf"`, `start_url: "/library"`,
@@ -707,13 +814,14 @@ Tailwind v4 `@theme` tokens (CSS variables), mapped for both modes:
 
 ## 12a. SEO
 
-The library is private (invite-only), so SEO targets the **public shell** while keeping all private
-content out of search indexes.
+All library content is private (per-account, series shared by invite), so SEO targets the **public
+shell** (landing, login, signup) while keeping all private content out of search indexes.
 - **Metadata**: App Router Metadata API in `layout.tsx` + per-route `generateMetadata`. Title template
   (`%s · Shelf`), description, canonical URLs, `metadataBase` from `APP_URL`, OpenGraph + Twitter cards,
   `theme-color` (matches palette), and a generated OG image (`opengraph-image.tsx`) for the landing page.
-- **Indexing policy**: `robots.ts` allows `/`, `/login`, `/signup` and **disallows** `/library`,
-  `/series`, `/read`, `/upload`, `/settings`, `/accept`, `/api`. Authenticated/app routes set
+- **Indexing policy**: `robots.ts` allows `/`, `/login`, `/signup`, `/forgot-password`, and `/upload`
+  (public upload entry point) and **disallows** `/library`, `/series`, `/read`, `/settings`, `/accept`,
+  `/reset-password` (token in URL), and `/api`. Authenticated/app routes set
   `robots: { index: false, follow: false }` in their metadata as defense in depth.
 - **`sitemap.ts`**: only the public routes.
 - **Structured data**: minimal `WebApplication` JSON-LD on the landing page. No content JSON-LD (private).
@@ -761,25 +869,32 @@ Never leave the build broken between phases.
 - Acceptance: typecheck/lint/tests pass; health returns 200 with all three checks when services up.
 - Result: typecheck + eslint + prettier clean; 8/8 unit tests (env validation) pass.
 
-### Phase 2 — Auth (with invite-gated signup)
-- [ ] `lib/auth/*` (password, tokens, session, cookies, requireUser, denylist, lockout).
-- [ ] `Invite` model + service; invite-gated signup (`SIGNUPS_OPEN` flag; bootstrap admin); mint app invite (admin); invite preview + accept routes.
-- [ ] Auth routes (signup, login, refresh w/ rotation+reuse, logout, logout-all, me, change-password, sessions list/delete).
-- [ ] `proxy.ts` optimistic gate; rate limiting on auth routes (fail closed).
-- [ ] Auth pages (/login, /signup w/ invite token, /accept/[token]), providers (theme + query client + `InstallPrompt`), `fetchWithAuth`.
-- [ ] PWA manifest (`app/manifest.ts`) + generated icons (192/512/maskable/apple-touch) + theme-color meta.
-- [ ] Design tokens: wire the fixed palette (§12) into Tailwind v4 `@theme` for light/dark; base UI primitives.
-- [ ] SEO base: `metadataBase`/title template, `robots.ts`, `sitemap.ts`, landing `opengraph-image.tsx`, per-route noindex on app routes.
-- [ ] Unit tests: jwt sign/verify, rotation, reuse detection, lockout, password hashing, invite token hash/verify/expiry.
-- Deliverables: bootstrap admin signs up; invited user signs up via token; full login→refresh→logout cycle; protected route redirect.
-- Acceptance: signup blocked without a valid invite when SIGNUPS_OPEN=false; reused refresh token revokes family; logout invalidates access immediately; 429 on brute force.
+### Phase 2 — Auth (email-verified open signup) — DONE
+- [x] `lib/auth/*` (password, access-token, refresh-token, session, cookies, require-user, denylist, rate-limit, lockout).
+- [x] Open signup (no invite; duplicate-email 409; admin bootstrap via first-user or `BOOTSTRAP_ADMIN_EMAIL`).
+- [x] **Email verification (Resend)**: signup-start emails a 6-digit code into a pending `EmailVerification`; verify-email creates the account + sends welcome; resend endpoint. `lib/email/*` (pure templates + `server-only` sender), `lib/auth/verification.ts` + `opaque-token.ts`.
+- [x] **Password reset (Resend)**: `PasswordReset` model, forgot (generic) + reset (revoke all sessions, confirmation email) routes and pages.
+- [x] Auth routes (signup, verify-email, verify-email/resend, password/forgot, password/reset, login, refresh w/ rotation+reuse, logout, logout-all, me, change-password, sessions list/delete).
+- [x] `proxy.ts` optimistic gate (edge-safe, jose-only); rate limiting on auth routes (fail closed) + per IP/email login lockout.
+- [x] Auth pages (/login, two-step /signup, /forgot-password, /reset-password); landing reframed to **upload-first** (upload not gated behind signup; `/upload` removed from protected prefixes). Providers (theme + query client + `InstallPrompt` + toaster), `fetchWithAuth` (single-flight refresh retry).
+- [x] PWA manifest (`app/manifest.ts`) + generated icons (192/512/maskable/apple-touch, `scripts/generate-icons.mjs`) + theme-color viewport.
+- [x] Design tokens: fixed palette (§12) wired into Tailwind v4 `@theme` for light/dark; base UI primitives (button/input/label), landing page.
+- [x] SEO base: `metadataBase`/title template, `robots.ts`, `sitemap.ts`, landing `opengraph-image.tsx`. (Per-route noindex is applied as each private app route is built in later phases; robots.ts already disallows them.)
+- [x] Unit tests: jwt sign/verify + tamper/expiry, refresh hash, session rotation/reuse classification, lockout backoff, password hashing, verification code gen/classify, opaque token, email template rendering.
+- Deliverables: any visitor verifies their email then signs up; first user/bootstrap email gets admin role; full login→refresh→logout cycle; password reset by email; protected route redirect; upload page reachable without an account.
+- Acceptance: signup requires a valid emailed code before the account is created; duplicate email → 409; reused refresh token revokes family; logout invalidates access immediately; 429 on brute force; reset link is single-use and revokes sessions.
+- Result (initial): production build passes; typecheck + eslint + prettier clean; 26/26 unit tests pass; end-to-end auth flow (signup, me, refresh rotation, reuse→family revoke, logout, logout-all, CSRF 403, lockout 429, protected-route 307) confirmed against dev server with live Mongo + Redis.
+- Result (email-verification revision): production build passes (all routes incl. verify-email, verify-email/resend, password/forgot, password/reset, /upload, /forgot-password, /reset-password); typecheck + eslint + prettier clean; 45/45 unit tests pass (added verification codegen/classify, opaque-token, email-template rendering, RESEND_API_KEY/EMAIL_FROM env). New deps: `resend`. **Live end-to-end confirmed against dev server (Mongo + Redis + real Resend delivery)**: signup 200 pending (code emailed) → verify-email 201 (account created admin, welcome email) → me 200; duplicate 409; stale/no-pending verify 400; CSRF-no-Origin 403; forgot 200 (reset link emailed) → reset 200 (confirmation email) → token reuse 400 → old session 401 (revoked + tokenVersion bump); login old-password 401, new-password 200. Also fixed a `ThemeToggle` hydration mismatch (aria-label now mount-guarded).
 
-### Phase 3 — Upload (API + UI)
+(Series invites — model already exists from Phase 1; the invite service, preview, and accept flow are built in Phase 4 with the rest of sharing.)
+
+### Phase 3 — Upload (API + UI, anonymous-capable)
 - [ ] Presign (single + multipart), parts, complete (HeadObject verify), abort; quota + concurrency guards; owner-only target series.
-- [ ] `upload.service.ts`, Upload model wiring (incl. `renderMode`), rate limit (upload tier).
-- [ ] Upload UI: drag-drop, per-file cards, progress, series assign/create, chapter meta edit, PDF/EPUB reader-mode chooser, abort.
-- Deliverables: file lands in R2 `uploads/raw/...`; Chapter created `queued` with chosen renderMode; job enqueued.
-- Acceptance: >100 MB uses multipart; oversize/over-quota rejected; abort aborts multipart; renderMode=document rejected for non PDF/EPUB.
+- [ ] `upload.service.ts`, Upload model wiring (incl. `renderMode`, `anonId`), rate limit (upload tier).
+- [ ] **Anonymous uploads**: `shelf_anon` cookie minted on first upload (`ANON_UPLOAD_TTL`); anon `Upload`/`Series`/`Chapter` carry `anonId` + TTL; per-anon-session storage cap; the claim hooks added in Phase 2 (`claimAnonUploads`) run on signup/login.
+- [ ] Upload UI (public): drag-drop, per-file cards, progress, series assign/create, chapter meta edit, PDF/EPUB reader-mode chooser, abort; anonymous banner + "sign in to read" routing.
+- Deliverables: file lands in R2 `uploads/raw/...` (anonymous or owned); Chapter created `queued` with chosen renderMode; job enqueued; anonymous uploads claim onto the account at sign-in.
+- Acceptance: >100 MB uses multipart; oversize/over-quota rejected; abort aborts multipart; renderMode=document rejected for non PDF/EPUB; anonymous upload becomes owned + readable after auth; unclaimed data is TTL-purged.
 
 ### Phase 4 — Worker + ingestion (ZIP first)
 - [ ] BullMQ setup (`worker/`), graceful shutdown, Zod job payloads, concurrency from env.
@@ -822,8 +937,8 @@ Never leave the build broken between phases.
 - [ ] SEO audit: metadata/OG/canonical on every route, robots + sitemap correct, private routes noindexed, valid JSON-LD on landing.
 - [ ] Performance pass: dynamic-import heavy readers, per-icon imports, `next/image` sizes, first-load JS budget check, confirm CLS ~0 and good LCP/INP on landing/library/reader.
 - [ ] Accessibility pass (Lighthouse 90+ on library + reader).
-- [ ] Playwright: signup (via invite), login, upload small CBZ, read, progress persists after reload; share a series and read as invited user.
-- [ ] `Dockerfile.worker`, `docker-compose.yml` (worker, redis, optional app), README (R2 bucket/CORS/lifecycle, Redis, running worker, deploy on Oracle VM, ARM/x64 notes, invite bootstrap), `npm audit`.
+- [ ] Playwright: open signup, login, upload small CBZ, read, progress persists after reload; share a series (invite) and read as the invited user after they accept.
+- [ ] `Dockerfile.worker`, `docker-compose.yml` (worker, redis, optional app), README (R2 bucket/CORS/lifecycle, Redis, running worker, deploy on Oracle VM, ARM/x64 notes, admin bootstrap), `npm audit`.
 - Deliverables: production-ready worker image + compose; complete README.
 - Acceptance: all acceptance criteria in the task met; app is installable (manifest + SW, Install button works, iOS fallback shown); lint/typecheck/unit/e2e green; **Lighthouse Performance, Accessibility, Best-Practices, and SEO all 90+** on landing, library, and reader.
 
@@ -843,11 +958,15 @@ Never leave the build broken between phases.
 - **D10** (overrides task non-goal "strictly private per user"): content supports **invite-based
   per-series sharing**. Access is via `SeriesMember` (owner|reader), not `ownerId` equality. Still no
   public content and no discovery. Series/Chapter/Page use `ownerId`; Progress/Upload/Session use `userId`.
-- **D11**: Instance is **invite-only** (`SIGNUPS_OPEN=false` default). First user or `BOOTSTRAP_ADMIN_EMAIL`
-  becomes admin without an invite. Invites are opaque, hashed, email-bound, single-use, expiring (`INVITE_TTL`).
-- **D11a**: **Every invite requires an explicit accept click**, including invitees who already have an
-  account (no silent auto-add). A series invite always creates a pending `Invite`; membership is granted
-  only when the invitee opens `/accept/[token]` and confirms (signing in or signing up first if needed).
+- **D11** (revised): **Signup is open / self-serve** — anyone can create an account; no app-level
+  invite gating and no `SIGNUPS_OPEN` flag. Invites are **series-scoped only**: a series owner invites
+  specific users to view that series. First user or `BOOTSTRAP_ADMIN_EMAIL` gets the `admin` role for
+  instance operations (this is a role flag only, not a signup gate). Series invites are opaque, hashed,
+  email-bound, single-use, expiring (`INVITE_TTL`).
+- **D11a**: **Every series invite requires an explicit accept click**, including invitees who already
+  have an account (no silent auto-add). A series invite always creates a pending `Invite`; membership is
+  granted only when the invitee opens `/accept/[token]` and confirms (signing in or signing up first if
+  needed).
 - **D12**: PDF/EPUB get a **per-file reader-mode choice**: "images" (rasterize/extract to WebP, image
   reader) or "document" (keep original, native reader — PDF.js / epub.js). The UI offers only options
   possible for that file. Adds `Chapter.renderMode/documentKey/documentFormat` and `chapters/:id/document`.
@@ -876,15 +995,54 @@ Never leave the build broken between phases.
   in a client bundle anyway.
 - **D20** (Phase 1): `@types/node` bumped `^20 → ^22` to match the Node 22 runtime and satisfy vitest 5's
   peer requirement. `vitest.config` uses the `.mts` extension (ESM) to avoid the Vite CJS-loader warning.
+- **D21** (Phase 2, deviation from task's `argon2`): password hashing uses **`@node-rs/argon2`** instead of
+  `argon2`. Reason: prebuilt N-API binaries mean no node-gyp/native toolchain on Windows dev or the ARM64
+  Oracle target. Still argon2id (its default); params memoryCost 64 MiB / timeCost 3 / parallelism 1.
+- **D22** (Phase 2): `sharp` was added in Phase 2 (earlier than its Phase 3 image-pipeline use) to generate
+  the PWA icons via `scripts/generate-icons.mjs`. Pinned to `^0.35.4` because `<=0.35.4-rc.0` carried the
+  high-severity libvips/libheif advisories (GHSA-f88m-g3jw-g9cj etc.); `npm audit` is clean.
+- **D23** (Phase 2): with `sanitizeFilter: true`, any **code-authored** query operator (`$exists`, `$gt`,
+  `$ne`, …) must be wrapped in `mongoose.trusted(...)`, otherwise Mongoose wraps it in `$eq` and it either
+  matches nothing or throws a CastError. Applied across `session.ts`; the same rule governs all future
+  content queries.
+- **D24** (Phase 2): access-token verification lives in `lib/auth/access-token.ts`, kept edge-safe (jose +
+  env + `crypto.randomUUID` only) so the proxy can import it. Refresh-token crypto (`node:crypto`) lives in
+  a separate `refresh-token.ts` that the proxy never imports. The proxy gate is optimistic: it allows an
+  expired access token through when a refresh cookie is present (the client refreshes; `requireAuth()` in
+  Node route handlers/server components is the authoritative check).
+- **D25** (Phase 2 revision): **Signup is email-verified via a verify-then-create flow.** Signup-start
+  argon2-hashes the password into a TTL'd `EmailVerification` doc and emails a 6-digit code (Resend); the
+  `User` is created only when `verify-email` confirms the code. Rationale over "create with
+  `emailVerified=false`": no half-real accounts, no unverified rows squatting a unique email, and the
+  pending doc self-expires. Email transport is the **`resend` SDK**; `EMAIL_FROM` defaults to
+  `Shelf <onboarding@resend.dev>` (works in dev to the account owner) — production needs a verified
+  domain. `RESEND_API_KEY` is a required env var. Codes: `crypto.randomInt`, sha-256 at rest,
+  attempt-capped.
+- **D26** (Phase 2 hooks; Phase 3 impl): **Upload before sign-in with claim-on-auth.** Uploading needs no
+  account; an httpOnly `shelf_anon` cookie tags anonymous `Upload`/`Series`/`Chapter` (with TTL) so they
+  self-purge if never claimed. Reading requires an account; signup/login run `claimAnonUploads(anonId →
+  userId)` to reassign ownership and add the owner membership. Consequences captured now in Phase 2:
+  `/upload` is **not** an auth-gated prefix, the landing is upload-first, and content models must allow
+  `ownerId`-until-claimed (built in Phase 3). Rationale: lowest-friction trial (upload first, commit
+  later) with identical handling for new and existing accounts.
+- **D27** (Phase 2 revision): **Password reset by email.** Opaque token (sha-256 at rest, single-use,
+  `PASSWORD_RESET_TTL`), generic `forgot` response (no enumeration), reset bumps `tokenVersion` + revokes
+  all sessions + emails a confirmation. Kept in `password-reset.service.ts` separate from `auth.service`.
 
 ## 15. Environment variables (additions to the task's list)
 
 Validated in `lib/env.ts` (Zod, fail fast) alongside the task-provided vars:
 ```
-SIGNUPS_OPEN=false            # invite-only when false
-INVITE_TTL=604800             # 7 days, seconds
-BOOTSTRAP_ADMIN_EMAIL=        # optional; this email becomes admin on signup without an invite
+INVITE_TTL=604800             # 7 days, seconds — series invite link lifetime
+BOOTSTRAP_ADMIN_EMAIL=        # optional; this email gets the admin role on signup (instance ops)
+RESEND_API_KEY=               # required; Resend API key for transactional email
+EMAIL_FROM=Shelf <onboarding@resend.dev>   # default; production needs a verified sending domain
+EMAIL_VERIFICATION_TTL=600    # 10 min, seconds — signup verification code lifetime
+PASSWORD_RESET_TTL=3600       # 1 hour, seconds — password reset link lifetime
+ANON_UPLOAD_TTL=172800        # 2 days, seconds — unclaimed anonymous upload retention (Phase 3)
 ```
+Note: there is no `SIGNUPS_OPEN` flag — signup is always open/self-serve (but email-verified). Invites
+gate *series access*, not account creation.
 Deploy note (D14): `APP_PORT` / `REDIS_PORT` (or compose port mappings) are configurable to coexist
 with the app already running on the VM.
 

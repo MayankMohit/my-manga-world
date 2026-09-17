@@ -1,26 +1,87 @@
 @import "tailwindcss";
 
+/*
+ * Shelf design tokens. Fixed four-color palette (Decision D17):
+ *   #222831 ink/bg-dark · #31363F surface · #76ABAE accent · #EEEEEE paper.
+ * Dark-first: :root holds the dark values; `.light` overrides them. next-themes
+ * toggles the `light` / `dark` class on <html>.
+ */
+
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #222831;
+  --surface: #31363f;
+  --surface-2: #3a4049;
+  --foreground: #eeeeee;
+  --muted: rgba(238, 238, 238, 0.68);
+  --border: rgba(238, 238, 238, 0.1);
+  --accent: #76abae;
+  --accent-hover: #86bbbe;
+  --accent-foreground: #10201f;
+  --ring: #76abae;
+  --danger: #e5757c;
+}
+
+.light {
+  --background: #eeeeee;
+  --surface: #ffffff;
+  --surface-2: #f4f5f6;
+  --foreground: #222831;
+  --muted: rgba(34, 40, 49, 0.66);
+  --border: rgba(34, 40, 49, 0.12);
+  --accent: #4f878b;
+  --accent-hover: #3f767a;
+  --accent-foreground: #ffffff;
+  --ring: #4f878b;
+  --danger: #c0454d;
 }
 
 @theme inline {
   --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
   --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-ring: var(--ring);
+  --color-danger: var(--danger);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  border-color: var(--border);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+/* Visible, accessible focus rings on keyboard navigation. */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
